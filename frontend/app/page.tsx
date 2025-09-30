@@ -2,8 +2,7 @@
 
 import React, { useState, useEffect, useRef } from 'react';
 import { Upload, Send, FileText, Bot, Loader2 } from 'lucide-react';
-
-// --- Types ---
+import { uploadPDF, chatPDF } from '../utils/api'; 
 type ChatMessage = {
   id: number;
   text: string;
@@ -14,50 +13,14 @@ type ChatMessage = {
 
 type AppState = 'INITIAL' | 'PROCESSING' | 'READY';
 
-// --- Simulated Data ---
-const simulatedSummary = [
-  'The Q4 report highlights a 15% growth in cloud computing division.',
-  'Key finding: Remote work policies boosted employee productivity by 7% in Q1.',
-  'The primary risk factor identified is increased energy costs affecting supply chain.',
-  'Recommendation: Prioritize investment in Asian markets for the next fiscal year.',
-  'Summary conclusion: Overall positive outlook, contingent on market stability and labor costs.',
-  'Customer satisfaction scores increased by 12% across enterprise clients.',
-  'The marketing division reduced ad spend while improving ROI by 9%.',
-  'Supply chain delays are expected due to geopolitical tensions.',
-  'Employee retention rate improved by 5% after new training initiatives.',
-  'Strong pipeline of partnerships projected for the next 2 quarters.'
-];
-
-const simulatedQnAMap: { [key: string]: ChatMessage } = {
-  growth: {
-    id: 100,
-    text: 'The cloud computing division showed a substantial 15% growth, driven by key enterprise contracts signed in the last quarter.',
-    fromUser: false,
-    isGrounded: true,
-    groundingText: 'The Q4 report highlights a 15% growth in cloud computing division.'
-  },
-  risk: {
-    id: 101,
-    text: 'The report identifies that increased energy costs pose a risk to the global supply chain, which could impact production margins next quarter.',
-    fromUser: false,
-    isGrounded: true,
-    groundingText: 'The primary risk factor identified is increased energy costs.'
-  },
-  unrelated: {
-    id: 102,
-    text: 'That specific detail is not found within the context of the uploaded financial report.',
-    fromUser: false,
-    isGrounded: false
-  }
-};
-
 let messageIdCounter = 0;
 
-// --- Main Component ---
 export default function PDFQASummaryApp() {
   const [isClient, setIsClient] = useState(false);
   const [appState, setAppState] = useState<AppState>('INITIAL');
   const [pdfFile, setPdfFile] = useState<File | null>(null);
+
+  const [fileId, setFileId] = useState<string | null>(null); 
   const [summary, setSummary] = useState<string[]>([]);
   const [chatInput, setChatInput] = useState('');
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
@@ -72,7 +35,7 @@ export default function PDFQASummaryApp() {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [chatMessages]);
 
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0] ?? null;
     if (!file || !file.name.toLowerCase().endsWith('.pdf')) {
       return console.error('Please upload a valid PDF file.');
@@ -82,9 +45,19 @@ export default function PDFQASummaryApp() {
     setAppState('PROCESSING');
     setSummary([]);
     setChatMessages([]);
+    setFileId(null); 
 
-    setTimeout(() => {
-      setSummary(simulatedSummary);
+    try {
+      // 2. REPLACE SIMULATED UPLOAD WITH API CALL
+      const data = await uploadPDF(file);
+
+      // The backend should return the file_id and a summary list or text.
+      const newSummary = Array.isArray(data.summary) 
+        ? data.summary 
+        : (data.summary ? [data.summary] : []);
+        
+      setFileId(data.file_id);
+      setSummary(newSummary);
       setChatMessages([
         {
           id: messageIdCounter++,
@@ -93,38 +66,56 @@ export default function PDFQASummaryApp() {
         }
       ]);
       setAppState('READY');
-    }, 2000);
+    } catch (error) {
+      console.error('PDF Upload Error:', error);
+      alert('Failed to process PDF. Please try again.');
+      setAppState('INITIAL');
+      setPdfFile(null);
+    }
   };
 
-  const handleChatSubmit = (e: React.FormEvent) => {
+  const handleChatSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     const userQuery = chatInput.trim();
-    if (!userQuery || appState !== 'READY') return;
+    if (!userQuery || appState !== 'READY' || !fileId) return;
 
+    // Add user message immediately
     setChatMessages((msgs) => [
       ...msgs,
       { id: messageIdCounter++, text: userQuery, fromUser: true }
     ]);
     setChatInput('');
+    setAppState('PROCESSING'); // Temporarily set to processing while waiting for bot
 
-    setTimeout(() => {
-      const queryLower = userQuery.toLowerCase();
-      let botResponseData: ChatMessage;
+    try {
+      // 3. REPLACE SIMULATED CHAT WITH API CALL
+      const data = await chatPDF(fileId, userQuery);
 
-      if (queryLower.includes('growth') || queryLower.includes('percent')) {
-        botResponseData = simulatedQnAMap['growth'];
-      } else if (queryLower.includes('risk') || queryLower.includes('cost')) {
-        botResponseData = simulatedQnAMap['risk'];
-      } else {
-        botResponseData = simulatedQnAMap['unrelated'];
-      }
+      let botResponseData: ChatMessage = {
+        id: messageIdCounter++,
+        text: data.answer || 'I could not find an answer in the document.', // Use 'answer' field from API
+        fromUser: false,
+        isGrounded: !!data.grounding_text, // Check if grounding text exists
+        groundingText: data.grounding_text // Use 'grounding_text' field from API
+      };
 
-      botResponseData.id = messageIdCounter++;
       setChatMessages((msgs) => [...msgs, botResponseData]);
-    }, 1200);
+      
+    } catch (error) {
+      console.error('Chat Error:', error);
+      let errorResponse: ChatMessage = {
+        id: messageIdCounter++,
+        text: 'An error occurred while fetching the answer. Please check the backend.',
+        fromUser: false,
+        isGrounded: false
+      };
+      setChatMessages((msgs) => [...msgs, errorResponse]);
+    } finally {
+        setAppState('READY'); // Set back to ready after response
+    }
   };
 
-  // --- UI Helpers ---
+  // --- UI Helpers (Unchanged) ---
   const Card = ({
     title,
     icon,
@@ -189,6 +180,7 @@ export default function PDFQASummaryApp() {
     );
   }
 
+  // --- Render (Unchanged UI Structure) ---
   return (
     <div className="relative min-h-screen flex flex-col bg-gradient-to-br from-indigo-50 to-white dark:from-gray-900 dark:to-gray-950">
       <main className="flex-grow w-full max-w-6xl mx-auto px-4 py-6 sm:px-6 lg:px-8">
@@ -216,10 +208,10 @@ export default function PDFQASummaryApp() {
                 : 'border-indigo-300 hover:border-indigo-500 dark:border-gray-600 dark:hover:border-indigo-400'
             }`}
             onClick={() => {
-  if (appState === 'INITIAL' || appState === 'READY') {
-    fileInputRef.current?.click();
-  }
-}}
+              if (appState === 'INITIAL' || appState === 'READY') {
+                fileInputRef.current?.click();
+              }
+            }}
           >
             {appState === 'PROCESSING' ? (
               <div className="flex flex-col items-center">
@@ -261,7 +253,7 @@ export default function PDFQASummaryApp() {
               >
                 <div className="max-h-[500px] overflow-y-auto pr-2 space-y-2">
                   <ul className="list-disc pl-4 space-y-2">
-                    {summary.length === 0 ? (
+                    {summary.length === 0 && appState === 'PROCESSING' ? (
                       <li className="italic text-gray-500">
                         Extracting insights from your PDF...
                       </li>
