@@ -93,10 +93,10 @@ export default function PDFQASummaryApp() {
 
       let botResponseData: ChatMessage = {
         id: messageIdCounter++,
-        text: data.answer || 'I could not find an answer in the document.', // Use 'answer' field from API
+        text: data.answer || 'I could not find an answer in the document.', 
         fromUser: false,
-        isGrounded: !!data.grounding_text, // Check if grounding text exists
-        groundingText: data.grounding_text // Use 'grounding_text' field from API
+        isGrounded: !!data.grounding_text, 
+        groundingText: data.grounding_text 
       };
 
       setChatMessages((msgs) => [...msgs, botResponseData]);
