@@ -1,3 +1,25 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+@layer base {
+  :root {
+    color-scheme: dark;
+  }
+
+  body {
+    @apply bg-slate-950 text-slate-100;
+  }
+
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: rgba(103, 232, 249, 0.35) transparent;
+  }
+}
+
+@layer components {
+  .pdf-preview-frame {
+    color-scheme: dark;
+    opacity: 0.97;
+  }
+}

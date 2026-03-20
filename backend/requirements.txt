@@ -5,5 +5,8 @@ aiofiles
 pymupdf
 sentence-transformers
 chromadb
-openai
 numpy
+numpy
+requests
+transformers
+torch
