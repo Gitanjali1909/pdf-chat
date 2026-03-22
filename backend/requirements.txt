@@ -6,7 +6,4 @@ pymupdf
 sentence-transformers
 chromadb
 numpy
-numpy
-requests
-transformers
-torch
+openai

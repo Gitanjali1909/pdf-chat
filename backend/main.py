@@ -5,28 +5,25 @@ import uuid
 import aiofiles
 import chromadb
 import fitz
-import requests
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
-from sentence_transformers import SentenceTransformer
-from transformers import pipeline
+from openai import OpenAI
 
 load_dotenv()
 
-HF_TOKEN = os.getenv("HF_TOKEN", "").strip()
-HF_SUMMARY_MODEL = os.getenv("HF_SUMMARY_MODEL", "google/flan-t5-small")
-HF_CHAT_MODEL = os.getenv("HF_CHAT_MODEL", "google/flan-t5-small")
-OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2:3b")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
+GROQ_BASE_URL = os.getenv("GROQ_BASE_URL", "https://api.groq.com/openai/v1")
+GROQ_SUMMARY_MODEL = os.getenv("GROQ_SUMMARY_MODEL", "llama-3.1-8b-instant")
+GROQ_CHAT_MODEL = os.getenv("GROQ_CHAT_MODEL", "llama-3.1-8b-instant")
 
 UPLOAD_DIR = "./uploads"
 CHROMA_DIR = "./chroma_db"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(CHROMA_DIR, exist_ok=True)
 
-EMBED_MODEL = "all-MiniLM-L6-v2"
+EMBED_MODEL_NAME = "all-MiniLM-L6-v2"
 
 app = FastAPI(title="pdf-chat-backend")
 app.add_middleware(
@@ -36,41 +33,50 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-embed_model = SentenceTransformer(EMBED_MODEL)
-chroma_client = chromadb.PersistentClient(path=CHROMA_DIR)
-try:
-    collection = chroma_client.get_collection("pdf_collection")
-except Exception:
-    collection = chroma_client.create_collection(name="pdf_collection")
-
-SUMMARY_PIPELINE = None
-TEXT_PIPELINE = None
+embed_model = None
+chroma_client = None
+collection = None
+groq_client = None
 
 
-def masked_key(value: str):
-    if not value:
-        return "missing"
-    if len(value) <= 10:
-        return f"set(len={len(value)})"
-    return f"{value[:6]}...{value[-4:]} (len={len(value)})"
+print("Backend started successfully")
 
 
-def log_llm_configuration():
-    print("LLM provider selected: provider=huggingface-local-first")
+def get_groq_client():
+    global groq_client
+    if groq_client is None:
+        if not GROQ_API_KEY:
+            raise RuntimeError("GROQ_API_KEY is missing")
+        groq_client = OpenAI(api_key=GROQ_API_KEY, base_url=GROQ_BASE_URL)
+    return groq_client
+
+
+def get_embed_model():
+    global embed_model
+    if embed_model is None:
+        from sentence_transformers import SentenceTransformer
+
+        embed_model = SentenceTransformer(EMBED_MODEL_NAME)
+    return embed_model
 
 
 def get_collection():
+    global chroma_client, collection
+    if collection is not None:
+        return collection
+
     try:
-        return chroma_client.get_collection("pdf_collection")
-    except Exception as exc:
-        print(f"Chroma get_collection failed: {exc}")
-        print(traceback.format_exc())
+        if chroma_client is None:
+            chroma_client = chromadb.PersistentClient(path=CHROMA_DIR)
         try:
-            return chroma_client.create_collection(name="pdf_collection")
-        except Exception as create_exc:
-            print(f"Chroma create_collection failed: {create_exc}")
-            print(traceback.format_exc())
-            raise RuntimeError(f"ChromaDB collection initialization failed: {create_exc}") from create_exc
+            collection = chroma_client.get_collection("pdf_collection")
+        except Exception:
+            collection = chroma_client.create_collection(name="pdf_collection")
+        return collection
+    except Exception as exc:
+        print(f"Chroma collection init failed: {exc}")
+        print(traceback.format_exc())
+        raise RuntimeError(f"ChromaDB collection initialization failed: {exc}") from exc
 
 
 def chunk_text_by_chars(text, chunk_size=1000, overlap=200):
@@ -122,109 +128,49 @@ def parse_summary_points(summary_text: str):
     return points or [summary_text.strip()]
 
 
-def get_summary_pipeline():
-    global SUMMARY_PIPELINE
-    if SUMMARY_PIPELINE is None:
-        SUMMARY_PIPELINE = pipeline(
-            "summarization",
-            model=HF_SUMMARY_MODEL,
-            token=HF_TOKEN or None,
-        )
-    return SUMMARY_PIPELINE
-
-
-def get_text_pipeline():
-    global TEXT_PIPELINE
-    if TEXT_PIPELINE is None:
-        TEXT_PIPELINE = pipeline(
-            "text2text-generation",
-            model=HF_CHAT_MODEL,
-            token=HF_TOKEN or None,
-        )
-    return TEXT_PIPELINE
-
-
-def ollama_available():
+def groq_chat_completion(model: str, system_prompt: str, user_prompt: str):
     try:
-        response = requests.get(f"{OLLAMA_BASE_URL}/api/tags", timeout=2)
-        return response.ok
-    except Exception:
-        return False
-
-
-def call_ollama(prompt: str):
-    response = requests.post(
-        f"{OLLAMA_BASE_URL}/api/generate",
-        json={
-            "model": OLLAMA_MODEL,
-            "prompt": prompt,
-            "stream": False,
-        },
-        timeout=120,
-    )
-    response.raise_for_status()
-    data = response.json()
-    return (data.get("response") or "").strip(), "ollama", OLLAMA_MODEL
+        response = get_groq_client().chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0,
+        )
+        content = response.choices[0].message.content or ""
+        return content.strip(), "groq", model
+    except Exception as exc:
+        print(f"Groq completion failed: {exc}")
+        print(traceback.format_exc())
+        raise RuntimeError(f"Groq API error: {exc}") from exc
 
 
 def summarize_document(text: str, bullets: int = 5):
-    clipped = text[:3500]
-    prompt = f"Summarize the following PDF text in {bullets} short bullet points:\n\n{clipped}"
-    try:
-        summarizer = get_summary_pipeline()
-        result = summarizer(
-            prompt,
-            max_length=128,
-            min_length=32,
-            do_sample=False,
-        )
-        return result[0]["summary_text"].strip(), "huggingface", HF_SUMMARY_MODEL
-    except Exception as exc:
-        print(f"Summarization failed: {exc}")
-        print(traceback.format_exc())
-        if ollama_available():
-            return call_ollama(prompt)
-        raise RuntimeError(
-            "Summarization failed and Ollama is not available. "
-            "Set HF_TOKEN for gated models or start Ollama locally."
-        ) from exc
+    clipped = text[:5000]
+    return groq_chat_completion(
+        model=GROQ_SUMMARY_MODEL,
+        system_prompt="You summarize PDFs into concise bullet points.",
+        user_prompt=f"Summarize the following PDF text into exactly {bullets} concise bullet points.\n\n{clipped}",
+    )
 
 
 def answer_question(context: str, query: str):
-    prompt = (
-        "Answer using only the PDF context. "
-        "If the answer is not supported, reply exactly with: Not present in the PDF.\n\n"
-        f"Context:\n{context[:5000]}\n\nQuestion: {query}\n\nAnswer:"
+    clipped_context = context[:7000]
+    return groq_chat_completion(
+        model=GROQ_CHAT_MODEL,
+        system_prompt="Answer strictly from the provided PDF context. Be concise and grounded.",
+        user_prompt=(
+            "Answer the question using only the context below. "
+            "If the answer is not supported by the context, reply with exactly: Not present in the PDF.\n\n"
+            f"Context:\n{clipped_context}\n\nQuestion: {query}"
+        ),
     )
-    try:
-        generator = get_text_pipeline()
-        result = generator(
-            prompt,
-            max_new_tokens=160,
-            do_sample=False,
-        )
-        generated = result[0]["generated_text"].strip()
-        return generated, "huggingface", HF_CHAT_MODEL
-    except Exception as exc:
-        print(f"text-generation failed: {exc}")
-        print(traceback.format_exc())
-        if ollama_available():
-            return call_ollama(prompt)
-        raise RuntimeError(
-            "text-generation failed and Ollama is not available. "
-            "Set HF_TOKEN for gated models or start Ollama locally."
-        ) from exc
-
-
-log_llm_configuration()
 
 
 @app.post("/upload")
 async def upload_pdf(file: UploadFile = File(...)):
     try:
-        print(
-            f"/upload started: filename={file.filename}, content_type={file.content_type}, hf_token={masked_key(HF_TOKEN)}"
-        )
         if file.content_type != "application/pdf":
             raise HTTPException(400, "Only PDF files allowed.")
 
@@ -246,7 +192,7 @@ async def upload_pdf(file: UploadFile = File(...)):
                     chunks.append({"page": page["page"], "start": start, "end": end, "text": text})
 
         texts = [chunk["text"] for chunk in chunks]
-        embeddings = embed_model.encode(texts, convert_to_numpy=True)
+        embeddings = get_embed_model().encode(texts, convert_to_numpy=True)
         ids = [f"{file_id}_{index}" for index in range(len(texts))]
         metadatas = [
             {
@@ -287,8 +233,8 @@ async def chat(file_id: str = Form(...), query: str = Form(...), top_k: int = Fo
     if not os.path.exists(local_path):
         raise HTTPException(404, "file_id not found")
 
-    q_emb = embed_model.encode([query], convert_to_numpy=True).tolist()[0]
-    results = collection.query(
+    q_emb = get_embed_model().encode([query], convert_to_numpy=True).tolist()[0]
+    results = get_collection().query(
         query_embeddings=[q_emb],
         n_results=top_k,
         include=["documents", "metadatas"],
