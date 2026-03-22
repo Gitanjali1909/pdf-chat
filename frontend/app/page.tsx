@@ -71,7 +71,8 @@ export default function PDFQASummaryApp() {
 
     try {
       const data: UploadResponse = await uploadPDF(file);
-      const baseUrl = process.env.NEXT_PUBLIC_API_BASE_URL ?? 'http://127.0.0.1:8000';
+      const baseUrl =
+        process.env.NEXT_PUBLIC_API_BASE_URL ?? 'https://pdf-chat-1.onrender.com';
       setFileId(data.file_id);
       setFileUrl(data.file_url ? `${baseUrl}${data.file_url}` : `${baseUrl}/files/${data.file_id}`);
       setSummary(data.summary ?? []);
